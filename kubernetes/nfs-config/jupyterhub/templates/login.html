@@ -1,0 +1,13 @@
+{% extends "templates/login.html" %}
+
+{% block script %}
+  {{super()}}
+
+  <script type="text/javascript">
+    function alertDialog() {
+      alert("[Info] From 06.07.20 onwards, the access to this server will be moved to IP:30300. Only the IP address is different, the rest should stay the same.\n\nHow to access the server?\n  - Via ssh: ssh -L 30300:IP:30300 student2s@home.inf.h-brs.de. Then go to localhost:30300 in your browser.\n  - Via university vpn: Follow this instruction: https://ux-2s18.inf.h-brs.de/faq-1/vpn , connect to the vpn and open your browser and go to IP:30300.\n\nThe new IP address is accessible from the day when this information is generated.\n\n\n*NOTE: If you use ssh, your local port should be the same as the one in the upstream servers, which is 30300. If they are different, some JupyterHub functionality may break!.");
+    }
+    //alertDialog();
+  </script>
+{% endblock %}
+

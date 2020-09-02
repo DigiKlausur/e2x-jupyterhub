@@ -1,0 +1,576 @@
+proxy:
+  secretToken: ""
+  service:
+    type: NodePort
+    nodePorts:
+      http: 31124
+  https:
+    enabled: true
+    type: manual
+    #type: letsencrypt, manual, offload, secret
+    manual:
+      key: |
+        -----BEGIN PRIVATE KEY-----
+        -----END PRIVATE KEY-----
+      cert: |
+        -----BEGIN CERTIFICATE-----
+        -----END CERTIFICATE-----
+
+hub:
+  cookieSecret: ""
+  concurrentSpawnLimit: 128
+  image:
+    name: digiklausur/k8s-hub
+    tag: e2x-0.9.0
+  #  pullPolicy: Always
+  extraVolumes:
+  - name: nfs-disk1-volume
+    nfs:
+      server: cluster.external.nfs
+      path: /srv/disk1
+  - name: tz-config
+    hostPath:
+       path: /usr/share/zoneinfo/Europe/Berlin
+  extraVolumeMounts:
+  - name: nfs-disk1-volume
+    mountPath: /srv/jupyterhub/config
+    subPath: 'jupyterhub'
+  - name: tz-config
+    mountPath: /etc/localtime
+    readOnly: true
+  db:
+    type: sqlite-pvc                                                   
+    pvc:          
+      accessModes:
+        - ReadWriteOnce                          
+      storage: 1Gi                              
+      storageClassName: nfs-disk1 
+  extraConfig:     
+    00-0-override-singleuser-config.py: |
+      # This config will take effects once the hub is shutdown/restart through admin panel
+      # change this to /srv/jupyterhub/      
+      import pandas as pd
+      import yaml
+      config_mount = '/srv/jupyterhub/config'
+      config_file = os.path.join(config_mount, 'config.yaml')
+      if os.path.isfile(config_file):
+          configs = {}
+          with open(config_file, 'r') as infile:
+              configs = yaml.safe_load(infile)
+
+          hub_config = configs['server']['e2x_hub_teaching_staging_01']
+          c.KubeSpawner.image = "{}:{}".format(hub_config['image']['name'],hub_config['image']['tag'])
+          c.KubeSpawner.image_pull_policy = hub_config['image']['pullPolicy']             
+          
+          if hub_config['resources']['cpu_guarantee']:
+              c.KubeSpawner.cpu_guarantee = hub_config['resources']['cpu_guarantee']
+          if hub_config['resources']['cpu_limit']:
+              c.KubeSpawner.cpu_limit = hub_config['resources']['cpu_limit']
+          if hub_config['resources']['mem_guarantee']:
+              c.KubeSpawner.mem_guarantee = hub_config['resources']['mem_guarantee']
+          if hub_config['resources']['mem_limit']:
+              c.KubeSpawner.mem_limit = hub_config['resources']['mem_limit']
+    
+    00-1-prespawn-hook.py: |      
+      # Find in the database how many courses this user is registered to
+      # Prespawn hook and mount his/her course volumes.
+      import pandas as pd
+      import yaml
+      #list of command to execute during spawning
+      cmds = []
+      async def pre_spawn_hook(spawner):
+          await spawner.load_user_options()
+          username = spawner.user.name
+          
+          #reset commands
+          cmds = []
+          # clear spawner attributes as Python spawner objects are peristent
+          # if you dont clear them, they will be persistent across restarts
+          # there may be duplicate mounts
+          spawner.volume_mounts = []
+
+          # db directory in the container
+          config_root = '/srv/jupyterhub/config'
+          
+          # mount user home directory
+          config_file = os.path.join(config_root, 'config.yaml')
+          
+          #list of command to be appended to file, e.g. nbgrader_config.py
+          cmds.append(r"echo 'c = get_config()'  >> /etc/jupyter/nbgrader_config.py")
+          #cmds.append(r"echo 'c.Exchange.timezone = '"Europe/Berlin"'' >> /etc/jupyter/nbgrader_config.py")
+          #cmds.append(r"echo 'c.NbGraderAPI.timezone = '"Europe/Berlin"'' >> /etc/jupyter/nbgrader_config.py")
+          if os.path.isfile(config_file):
+              configs = {}
+              with open(config_file, 'r') as infile:
+                  configs = yaml.safe_load(infile)
+
+              hub_config = configs['server']['e2x_hub_teaching_staging_01']
+              hub_mode = hub_config['mode'].lower()
+              semester_id = hub_config['semester_id'].lower()
+              
+              # nbgrader course database volume, remember to define this under extraVolumes
+              # in singleuser config
+              nbgrader_volume_name = 'nfs-disk2-volume'
+              nbgrader_volume_subpath = '_nbgrader/exchange'
+              nbgrader_exchange_root = "/srv/nbgrader/exchange"
+              if hub_mode == "exam":
+                  print("\x1b[6;30;42m" + "[INFO] Examination mode enabled....!" + "\x1b[0m")
+                  #course_list = hub_config['course_list']
+                  if hub_config['course_list'] and len(hub_config['course_list']) == 1:
+                      course_id = hub_config['course_list'][0]
+                      student_list_file = os.path.join(config_root, 'nbgrader', hub_mode, course_id+".csv")
+                      if os.path.isfile(student_list_file):
+                          registered_users = {}
+                          db_file_pd = pd.read_csv(student_list_file)
+                          student_list = list(db_file_pd.Username)
+                          if username in student_list:
+                              print("\x1b[6;30;42m" + "[INFO] Found course: {} for {} ".format(course_id, username) + "\x1b[0m")
+                              spawner.log.info("[pre spawn hook] found course %s for %s", course_id, username)
+                              
+                              spawner.log.info("[outbound] Mounting outbound volume")
+                              if hub_config['nbgrader']['personalized_outbound']:
+                                  spawner.log.info("[outbound] Using personalized outbound")
+                                  if hub_config['nbgrader']['assignment_id']:
+                                      assignment_id = hub_config['nbgrader']['assignment_id']
+                                  else:
+                                      spawner.log.info("[inbound] Using personalized outbound, but assignment_id is not given.\
+                                                        the assignment_id will unknown")
+                                      assignment_id = "unknown-assignment"
+
+                                  outbound_mount_dir = os.path.join(nbgrader_exchange_root, course_id, "personalized-outbound", assignment_id, username)
+                                  outbound_volume_mount = {}       
+                                  outbound_volume_mount['mountPath'] = outbound_mount_dir
+                                  outbound_volume_mount['name'] = nbgrader_volume_name
+                                  outbound_volume_mount['subPath'] = os.path.join(nbgrader_volume_subpath, course_id, "personalized-outbound",
+                                                                                  assignment_id, username)
+                                  spawner.volume_mounts.append(outbound_volume_mount)
+                                  # set nbgrader_config to use personalized_outbound
+                                  cmds.append(r"echo 'c.Exchange.personalized_outbound = True' >> /etc/jupyter/nbgrader_config.py")
+                              else: 
+                                  spawner.log.info("[outbound] Using default outbound")
+                                  outbound_mount_dir = os.path.join(nbgrader_exchange_root, course_id, "outbound")
+                                  outbound_volume_mount = {}       
+                                  outbound_volume_mount['mountPath'] = outbound_mount_dir
+                                  outbound_volume_mount['name'] = nbgrader_volume_name
+                                  outbound_volume_mount['subPath'] = os.path.join(nbgrader_volume_subpath, course_id, "outbound")
+                                  spawner.volume_mounts.append(outbound_volume_mount)
+                            
+                              #Add submit directory
+                              spawner.log.info("[inbound] Mounting inbound volume")
+                              if hub_config['nbgrader']['personalized_inbound']:
+                                  spawner.log.info("[inbound] Using personalized inbound directory")
+                                  inbound_mount_dir = os.path.join(nbgrader_exchange_root, course_id, "personalized-inbound", username)
+                                  inbound_volume_mount = {}       
+                                  inbound_volume_mount['mountPath'] = inbound_mount_dir
+                                  inbound_volume_mount['name'] = nbgrader_volume_name
+                                  inbound_volume_mount['subPath'] = os.path.join(nbgrader_volume_subpath, course_id, "personalized-inbound", username)
+                                  spawner.volume_mounts.append(inbound_volume_mount)
+                                  # set nbgrader_config to use personalized_inbound
+                                  cmds.append(r"echo 'c.Exchange.personalized_inbound = True' >> /etc/jupyter/nbgrader_config.py")
+                              else:
+                                  spawner.log.info("[inbound] Using default submit directory")
+                                  inbound_mount_dir = os.path.join(nbgrader_exchange_root, course_id, "inbound")
+                                  inbound_volume_mount = {}       
+                                  inbound_volume_mount['mountPath'] = inbound_mount_dir
+                                  inbound_volume_mount['name'] = nbgrader_volume_name
+                                  inbound_volume_mount['subPath'] = os.path.join(nbgrader_volume_subpath, course_id, "inbound")
+                                  spawner.volume_mounts.append(inbound_volume_mount)
+                                  
+
+                             # #Add feedback directory
+                              feedback_mount_dir = os.path.join(nbgrader_exchange_root, course_id, "feedback")
+                              feedback_volume_mount = {}       
+                              feedback_volume_mount['mountPath'] = feedback_mount_dir
+                              feedback_volume_mount['name'] = nbgrader_volume_name
+                              feedback_volume_mount['subPath'] = os.path.join(nbgrader_volume_subpath, course_id, "feedback")
+                              spawner.volume_mounts.append(feedback_volume_mount)
+                          else:
+                              print ("{} is not registered for {} exam".format(username, course_id))
+                          
+                          
+                      else:
+                          print ("\x1b[6;30;43m" + "[WARNING] File not found:",student_list_file,""+'\x1b[0m')
+                          print ("\x1b[6;30;43m" + "[WARNING] No course will be mounted to:",username,""+'\x1b[0m')
+                       
+                      home_volume_mount = {}       
+                      home_volume_mount['mountPath'] = '/home/jovyan'
+                      home_volume_mount['name'] = 'nfs-disk3-volume'
+                      home_volume_mount['subPath'] = os.path.join("homes", hub_mode, semester_id, course_id.lower()+"-"+username) 
+                      spawner.volume_mounts.append(home_volume_mount)
+
+                      tmp_volume_mount = {}       
+                      tmp_volume_mount['mountPath'] = '/tmp'
+                      tmp_volume_mount['name'] = 'nfs-disk3-volume'
+                      tmp_volume_mount['subPath'] = os.path.join("homes", hub_mode, semester_id, course_id.lower()+"-"+username, ".tmp")
+                      spawner.volume_mounts.append(tmp_volume_mount)
+                  else:
+                      print ("\x1b[6;30;43m" + "[WARNING] Only exactly ONE course is allowed for examination mode...!" + "\x1b[0m")
+                      print ("\x1b[6;30;43m"+"[WARNING] Home directory is ephermal and tmp uses cluster node tmp"+'\x1b[0m')
+
+                  
+              elif hub_mode == "teaching":
+                  print("\x1b[6;30;42m" + "[INFO] Teaching mode enabled....!" + "\x1b[0m")
+                  home_volume_mount = {}       
+                  home_volume_mount['mountPath'] = '/home/jovyan'
+                  home_volume_mount['name'] = 'nfs-disk3-volume'
+                  home_volume_mount['subPath'] = os.path.join("homes", hub_mode, username) 
+                  spawner.volume_mounts.append(home_volume_mount)
+                  
+                  existing_mounts = spawner.volume_mounts
+
+                  if hub_config['course_list']:
+                      teaching_root = os.path.join(config_root, 'nbgrader', hub_mode)
+                      registered_users = {}
+                      course_list = hub_config['course_list']
+                      for course_id in course_list:
+                          course_id_member_file = os.path.join(teaching_root, course_id+".csv")
+                          if os.path.isfile(course_id_member_file):
+                              db_file_pd = pd.read_csv(course_id_member_file)
+                              student_list = list(db_file_pd.Username)
+                              #check if the course name already in the nbgrader whitelist dict
+                              if course_id not in registered_users:
+                                  registered_users[course_id] = student_list
+                              else:
+                                  registered_users[course_id].extend(student_list)
+                          else:
+                              print ("\x1b[6;30;43m" + "[WARNING] Course file not found: {}".format(course_id_member_file) + "; skipping....!" + "\x1b[0m")
+
+                      #Add user nbgrader exchange course mount
+                      for course_id in registered_users.keys():
+                          for user_id in registered_users[course_id]:
+                              if user_id == username:
+                                  print("\x1b[6;30;42m" + "[INFO] Found course: {} for {} ".format(course_id, user_id) + "\x1b[0m")
+                                  spawner.log.info("[pre spawn hook] found course %s for %s", course_id, username)
+                                  mount_dir ="/srv/nbgrader/exchange/{}".format(course_id)
+                                  user_volume_mount = {}       
+                                  user_volume_mount['mountPath'] = mount_dir
+                                  user_volume_mount['name'] = nbgrader_volume_name
+                                  user_volume_mount['subPath'] = os.path.join(nbgrader_volume_subpath, "course_id")
+                                  existing_mounts.append(user_volume_mount)
+                  else:
+                      print ("\x1b[6;30;43m" + "[WARNING] No course ids supplied in the course_list...!" + "\x1b[0m")
+                  
+                  # sometimes spawner keeps appending mounts if it fails to spawn
+                  # duplicate mounts have to be removed, otherwise it keeps spawning forever
+                  print("\x1b[6;30;42m" + "[INFO] Checking duplicate mounts....!" + "\x1b[0m")
+                  for i,ext_mnt in enumerate(existing_mounts):
+                      print(ext_mnt['mountPath'])
+                      for j,ext_mnt_tmp in enumerate(existing_mounts):
+                          if i != j:
+                              if ext_mnt['mountPath'] == ext_mnt_tmp['mountPath']:
+                                  del existing_mounts[i]
+                  
+                  #replace the old mount
+                  spawner.volume_mounts = existing_mounts
+
+                  print ("\x1b[6;30;42m" + "[INFO] All mounts for:", username + "\x1b[0m")
+                  print (spawner.volume_mounts)
+              
+              # extra mounts from config file
+              if hub_config['extra_mounts'] and hub_config['extra_mounts']['enabled']:
+                  mount = hub_config['extra_mounts']
+                  # add mount it does not exists, is it the best way to do?
+                  
+                  for vmount in mount['volume_mounts'].values():
+                      spawner.log.info("Add extra volume mount from config:%s",vmount['mountPath'])
+                      extra_vmount = {}       
+                      extra_vmount['mountPath'] = vmount['mountPath']
+                      extra_vmount['name'] = vmount['name']
+                      extra_vmount['subPath'] = vmount['subPath']
+                      spawner.volume_mounts.append(extra_vmount)
+                  
+          else:
+              print ("\x1b[6;30;43m" + "[WARNING] Config file not found, /home/jovyan will be ephermal" + "\x1b[0m")
+              print ("\x1b[6;30;43m" + "[WARNING] Config file not found, no course will be mounted" + "\x1b[0m")
+              print ("\x1b[6;30;43m" + "[WARNING] Make sure extraVolumes configured in the hub container" + "\x1b[0m")
+          
+          #Override singleuser lifecyclehook
+          #write all nbgrader config in postStart
+          #remove user nbconfig
+          if 'commands' in hub_config:
+              spawner.log.info("[Commands] Looking into extra command")
+              extra_commands = hub_config['commands']
+              for extra_cmd in extra_commands:
+                  spawner.log.info("[Commands] Executing: %s", extra_cmd)
+                  cmds.append(r"{}".format(extra_cmd))              
+ 
+          spawner.lifecycle_hooks = {
+              "postStart": {
+                  "exec": {
+                      "command": ["/bin/sh", "-c", " && ".join(cmds)]
+                  }
+              },
+              "preStop": {
+                  "exec": {
+                      "command": ["/bin/sh", "-c", "rm -rf /tmp/*"]
+                  }
+              }
+          }
+
+      c.KubeSpawner.pre_spawn_hook = pre_spawn_hook
+ 
+    00-2-node-affinity.py: |      
+      # Add new node affinity for exam depending on the hub_mode
+      # if "exam", user will be scheduled to the nodes allocated for exam
+      # otherwise it will be allocated to teaching nodes (node with label "user")
+      config_root = '/srv/jupyterhub/config' 
+      config_file = os.path.join(config_root, 'config.yaml')
+      if os.path.isfile(config_file):
+          configs = {}
+          with open(config_file, 'r') as infile:
+              configs = yaml.safe_load(infile)
+          hub_config = configs['server']['e2x_hub_teaching_staging_01']
+          hub_mode = hub_config['mode'].lower()
+          if hub_mode == "exam":
+              node_selector = dict(
+                matchExpressions=[
+                    dict(
+                        key="hub.jupyter.org/node-purpose",
+                        operator="In",
+                        values=["exam"],
+                    )
+                ],
+              )
+          else:
+              node_selector = dict(
+                matchExpressions=[
+                    dict(
+                        key="hub.jupyter.org/node-purpose",
+                        operator="In",
+                        values=["user"],
+                    )
+                ],
+              )
+      else:
+          node_selector = dict(
+            matchExpressions=[
+                dict(
+                    key="hub.jupyter.org/node-purpose",
+                    operator="In",
+                    values=["user"],
+                )
+            ],
+          )
+          
+      c.KubeSpawner.node_affinity_required.append(node_selector)
+    
+    00-3-other-config.py: |      
+      c.KubeSpawner.disable_user_config = True
+      
+    00-4-hub-users.py: |
+      #Add jupyterhub users from csv file
+      #In exam mode,only one course is allowed
+      #blacklist is also added to prevent previous users from login in
+      import os
+      import yaml
+      import pandas as pd
+
+      config_root = '/srv/jupyterhub/config'
+      config_file = os.path.join(config_root, 'config.yaml')
+
+      whitelist_users = set()
+      #add users registered in the courses to the list
+      if os.path.isfile(config_file):
+          configs = {}
+          with open(config_file, 'r') as infile:
+              configs = yaml.safe_load(infile)
+          hub_config = configs['server']['e2x_hub_teaching_staging_01']
+          hub_mode = hub_config['mode'].lower()
+
+          #look for other user lists under users 
+          user_dir = os.path.join(config_root, "users")
+          
+          if hub_mode == "exam":
+              if hub_config['course_list'] and len(hub_config['course_list']) == 1:
+                  course_id = hub_config['course_list'][0]
+                  whitelist_file = os.path.join(config_root, 'nbgrader', hub_mode, course_id+".csv")
+                  if os.path.isfile(whitelist_file):
+                      print ("\x1b[6;30;42m"+ "[INFO] Found whitelist file: ",whitelist_file + "\x1b[0m")
+                      user_pd = pd.read_csv(whitelist_file)
+                      whitelist_users |= set(user_pd.Username)
+                  else:
+                      print ("\x1b[6;30;43m"+ "[WARNING] No nbgrader user list given: ",whitelist_file + "\x1b[0m")
+
+                  #add users to blacklist
+                  blacklist_dir = os.path.join(user_dir, "blacklist")
+                  blacklist_users = set()
+                  if os.path.isdir(blacklist_dir):
+                      blacklist_files = [csv_file for csv_file in os.listdir(blacklist_dir) if os.path.splitext(csv_file)[1] == ".csv"] 
+                      print ("\x1b[6;30;42m"+ "[INFO] Found ",len(blacklist_files), " blacklist files" + "\x1b[0m")
+                      print (blacklist_files)
+
+                      for i,csv_file in enumerate(blacklist_files):
+                          bl_course_id = os.path.splitext(csv_file)[0]
+                          csv_path = os.path.join(blacklist_dir, csv_file)
+                          user_pd = pd.read_csv(csv_path)
+                          for username in user_pd.Username:
+                              #check if username is in whitelist, and it's the same course
+                              #otherwise skip him/her, maybe he/her is registered in different courses
+                              if username in whitelist_users:
+                                  if bl_course_id == course_id:
+                                      blacklist_users.add(username)
+                                  else:
+                                      print ("\x1b[6;30;43m" + "[WARNING] {} not added to blacklist, the course id is different {} != {}".format(username, course_id, bl_course_id) + "\x1b[0m")
+                                      
+                              #username is not in the whitelist
+                              else:
+                                  blacklist_users.add(username)
+
+                  c.Authenticator.blacklist = blacklist_users
+              else:
+                  print ("\x1b[6;30;43m" + "[WARNING] Exam only accepts exactly one course" + "\x1b[0m")
+          #teaching mode
+          #add all users to hub
+          else:
+              if hub_config['course_list']:
+                  teaching_root = os.path.join(config_root, 'nbgrader', hub_mode)
+                  registered_users = {}
+                  course_list = hub_config['course_list']
+                  for course_id in course_list:
+                      course_id_member_file = os.path.join(teaching_root, course_id+".csv")
+                      if os.path.isfile(course_id_member_file):
+                          db_file_pd = pd.read_csv(course_id_member_file)
+                          whitelist_users |= set(db_file_pd.Username)
+                
+                      else:
+                          print ("\x1b[6;30;43m" + "[WARNING] Course file not found: {}".format(course_id_member_file) + "; skipping....!" + "\x1b[0m")
+              
+      else:
+          print ("\x1b[6;30;43m" + "[WARNING] Config file not found, no JupyterHub users are added...!" + "\x1b[0m")
+          print ("\x1b[6;30;43m" + "[WARNING] Config file not found, add them manually in the admin panel" + "\x1b[0m")
+     
+
+      #additional whitelist for hub admin
+      whitelist_dir = os.path.join(config_root, "whitelist")
+      if os.path.isdir(whitelist_dir):
+          whitelist_files = [csv_file for csv_file in os.listdir(whitelist_dir) if os.path.splitext(csv_file)[1] == ".csv"]
+
+          print ("\x1b[6;30;42m"+ "[INFO] Found ",len(whitelist_files), " whitelist files" + "\x1b[0m")
+          print (whitelist_files)
+
+          for i,csv_file in enumerate(whitelist_files):
+              csv_path = os.path.join(whitelist_dir, csv_file)
+              user_pd = pd.read_csv(csv_path)
+              whitelist_users |= set(user_pd.Username)
+
+      c.Authenticator.whitelist = whitelist_users
+
+cull:
+  enable: true
+  timeout: 7200
+
+auth:
+  type: ldap
+  ldap:
+    server:
+      address: ldap.infcs.de
+      ssl: True
+      port: 636
+    dn:
+      lookup: false
+      templates:
+        - 'uid={username},ou=students,dc=fb02,dc=fh-bonn-rhein-sieg,dc=de' 
+        - 'uid={username},ou=staff,dc=fb02,dc=fh-bonn-rhein-sieg,dc=de' 
+      user:
+        searchBase: 'ou=students,dc=fb02,dc=fh-bonn-rhein-sied,dc=de'
+        escape: False 
+  whitelist:
+    users:
+      - mwasil2m
+      - tmetzl2m
+    ldap:
+      enabled: false
+  admin:
+    users:
+      - mwasil2m
+      - tmetzl2m
+
+prePuller:
+  continuous:
+    enabled: true
+
+scheduling:
+  userScheduler:
+    enabled: true
+    replicas: 5
+  podPriority:
+    enabled: true
+  userPlaceholder:
+    enabled: true
+    replicas: 4
+  corePods:
+    nodeAffinity:
+      matchNodePurpose: require  # schedule core pods to core nodes
+ # userPods:
+ #   nodeAffinity:
+ #     matchNodePurpose: require #ignore default "user" pod affinity, then add "exam" node affinity in the costum hub config
+
+singleuser:
+  defaultUrl: "/tree"
+  
+  #lifecycleHooks:
+    #postStart:
+    #  exec:
+    #    command:
+    #      - "/bin/sh"
+    #      - "-c"
+    #      - >
+    #        echo 'c = get_config()' >> /etc/jupyter/nbgrader_config.py;
+    #        echo 'c.Exchange.timezone = "Europe/Berlin"' >> /etc/jupyter/nbgrader_config.py;
+    #        echo 'c.NbGraderAPI.timezone = "Europe/Berlin"' >> /etc/jupyter/nbgrader_config.py;
+    #        echo 'c.Exchange.personalized_inbound = True' >> /etc/jupyter/nbgrader_config.py;
+    #        echo 'c.Exchange.personalized_outbound = True' >> /etc/jupyter/nbgrader_config.py;
+    #        rm -rf $HOME/.jupyter/nbconfig*;
+            #python3 /srv/jupyterhub/bootstrap/WuS_Final.py
+   # preStop:
+   #   exec:
+   #     command: ["/bin/sh", "-c", "rm -rf /tmp/*"]
+
+  networkPolicy:
+    enabled: true
+    ingress:
+    egress:
+  memory:
+    limit: 0.75G
+    guarantee: 0.15G
+  cpu:
+    limit: 2.0
+    guarantee: 0.01
+  image:
+    name: digiklausur/restricted-notebook
+    tag: latest
+    pullPolicy: Always
+  storage:
+    #dynamic:
+    #  storageClass: standard
+    type: None
+    capacity: 1Gi
+    extraVolumes:
+    - name: nfs-disk3-volume
+      nfs:
+        server: cluster.external.nfs
+        path: /srv/disk3
+    - name: nfs-disk2-volume
+      nfs:
+        server: cluster.external.nfs
+        path: /srv/disk2
+#  profileList:
+#  - display_name: "E-Klausur Sommersemester 2020"
+#    description: "Click spawn to continue"
+#    default: true
+#    kubespawner_override:
+#      image: digiklausur/restricted-notebook:latest
+#      image_pull_policy: Always
+#      mem_limit: 0.75G
+#      mem_guarantee: 0.15G
+#      cpu_limit: 2
+#      cpu_guarantee: 0.01
+#      node_affinity_required:
+#        - matchExpressions:
+#          - key: hub.jupyter.org/node-purpose
+#            operator: In
+#            values:
+#            - exam
+
+
+

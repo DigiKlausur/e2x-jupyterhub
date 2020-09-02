@@ -1,0 +1,78 @@
+server:
+  e2x_hub_exam_staging_01:
+    mode: exam
+    semester_id: ss20
+    course_list: 
+      - MRC-Exam 
+    image:
+      name: digiklausur/restricted-notebook
+      tag: latest
+      pullPolicy: Always
+    resources:
+      cpu_guarantee: 0.01
+      cpu_limit: 2.0
+      mem_guarantee: 0.15G
+      mem_limit: 0.75G
+    nbgrader:
+      personalized_inbound: True
+      personalized_outbound: False
+      assignment_id: Klausur
+    extra_mounts:
+      enabled: True
+      volumes: 
+        #This is not used. Contact admin to make sure volume is available on the kubernetes cluster
+        1:
+          name: nfs-disk2-volume
+          nfs:
+            server: 10.20.168.211
+            path: /srv/disk2
+      volume_mounts:
+        1:
+          name: nfs-disk2-volume
+          mountPath: /srv/shared_files/e2x_instruction
+          subPath: 'shared_files/e2x_instruction'
+        2:
+          name: nfs-disk2-volume
+          mountPath: /srv/shared_files/latex_math_editor
+          subPath: 'shared_files/latex_math_editor'
+    #Commands to be executed after spawning
+    commands:
+      - rm -rf $HOME/.jupyter/nbconfig*
+      - FORCE_COPY=false
+      - INSTRUCTION_EN=/srv/shared_files/e2x_instruction/e2x_instruction_en
+      - INSTRUCTION_DE=/srv/shared_files/e2x_instruction/e2x_instruction_de
+      - if [ -d $INSTRUCTION_EN ] && $FORCE_COPY;then cp -r $INSTRUCTION_EN $HOME;else if [ -d $INSTRUCTION_EN ] && [ ! -d $HOME/e2x_instruction_en ];then cp -r $INSTRUCTION_EN $HOME;fi;fi
+      - if [ -d $INSTRUCTION_DE ] && $FORCE_COPY;then cp -r $INSTRUCTION_DE $HOME;else if [ -d $INSTRUCTION_DE ] && [ ! -d $HOME/e2x_instruction_de ];then cp -r $INSTRUCTION_DE $HOME;fi;fi
+      - LATEX_HELPER=/srv/shared_files/latex_math_editor
+      - if [ ! -d $HOME/latex_math_editor ] && [ -d $LATEX_HELPER ];then cp -r $LATEX_HELPER $HOME;fi
+ 
+  e2x_hub_teaching_staging_01:
+    mode: teaching
+    semester_id: ss20-teaching-staging
+    course_list: 
+      - WuS-WS1920
+      - K8s-SS20
+      - RP-SS20
+    image:
+      name: digiklausur/notebook
+      tag: latest
+      pullPolicy: Always
+    resources:
+      cpu_guarantee: 0.01
+      cpu_limit: 2.0
+      mem_guarantee: 0.15G
+      mem_limit: 1G
+    profile_list:
+      enable: False
+      profiles:
+        1:
+          display_name: Robot Perception with ML libraries
+          description: 2vCPUs 1GB 
+          default: True
+          kubespawner_override: 
+            image: digiklausur/minimal-notebook:latest
+            cpu_limit: 2.0
+            mem_limit: 1G
+        2:
+          display_name: Notebook with NLP related dataset
+          description: 2vCPUs 1GB 
