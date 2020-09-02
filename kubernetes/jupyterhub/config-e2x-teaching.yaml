@@ -227,7 +227,7 @@ hub:
                           if os.path.isfile(course_id_member_file):
                               db_file_pd = pd.read_csv(course_id_member_file)
                               student_list = list(db_file_pd.Username)
-                              #check if the course name already in the nbgrader whitelist dict
+                              #check if the course name already in the nbgrader allowlist dict
                               if course_id not in registered_users:
                                   registered_users[course_id] = student_list
                               else:
@@ -360,7 +360,7 @@ hub:
     00-4-hub-users.py: |
       #Add jupyterhub users from csv file
       #In exam mode,only one course is allowed
-      #blacklist is also added to prevent previous users from login in
+      #blocklist is also added to prevent previous users from login in
       import os
       import yaml
       import pandas as pd
@@ -368,7 +368,7 @@ hub:
       config_root = '/srv/jupyterhub/config'
       config_file = os.path.join(config_root, 'config.yaml')
 
-      whitelist_users = set()
+      allowlist_users = set()
       #add users registered in the courses to the list
       if os.path.isfile(config_file):
           configs = {}
@@ -383,40 +383,40 @@ hub:
           if hub_mode == "exam":
               if hub_config['course_list'] and len(hub_config['course_list']) == 1:
                   course_id = hub_config['course_list'][0]
-                  whitelist_file = os.path.join(config_root, 'nbgrader', hub_mode, course_id+".csv")
-                  if os.path.isfile(whitelist_file):
-                      print ("\x1b[6;30;42m"+ "[INFO] Found whitelist file: ",whitelist_file + "\x1b[0m")
-                      user_pd = pd.read_csv(whitelist_file)
-                      whitelist_users |= set(user_pd.Username)
+                  allowlist_file = os.path.join(config_root, 'nbgrader', hub_mode, course_id+".csv")
+                  if os.path.isfile(allowlist_file):
+                      print ("\x1b[6;30;42m"+ "[INFO] Found allowlist file: ",allowlist_file + "\x1b[0m")
+                      user_pd = pd.read_csv(allowlist_file)
+                      allowlist_users |= set(user_pd.Username)
                   else:
-                      print ("\x1b[6;30;43m"+ "[WARNING] No nbgrader user list given: ",whitelist_file + "\x1b[0m")
+                      print ("\x1b[6;30;43m"+ "[WARNING] No nbgrader user list given: ",allowlist_file + "\x1b[0m")
 
-                  #add users to blacklist
-                  blacklist_dir = os.path.join(user_dir, "blacklist")
-                  blacklist_users = set()
-                  if os.path.isdir(blacklist_dir):
-                      blacklist_files = [csv_file for csv_file in os.listdir(blacklist_dir) if os.path.splitext(csv_file)[1] == ".csv"] 
-                      print ("\x1b[6;30;42m"+ "[INFO] Found ",len(blacklist_files), " blacklist files" + "\x1b[0m")
-                      print (blacklist_files)
+                  #add users to blocklist
+                  blocklist_dir = os.path.join(user_dir, "blocklist")
+                  blocklist_users = set()
+                  if os.path.isdir(blocklist_dir):
+                      blocklist_files = [csv_file for csv_file in os.listdir(blocklist_dir) if os.path.splitext(csv_file)[1] == ".csv"] 
+                      print ("\x1b[6;30;42m"+ "[INFO] Found ",len(blocklist_files), " blocklist files" + "\x1b[0m")
+                      print (blocklist_files)
 
-                      for i,csv_file in enumerate(blacklist_files):
+                      for i,csv_file in enumerate(blocklist_files):
                           bl_course_id = os.path.splitext(csv_file)[0]
-                          csv_path = os.path.join(blacklist_dir, csv_file)
+                          csv_path = os.path.join(blocklist_dir, csv_file)
                           user_pd = pd.read_csv(csv_path)
                           for username in user_pd.Username:
-                              #check if username is in whitelist, and it's the same course
+                              #check if username is in allowlist, and it's the same course
                               #otherwise skip him/her, maybe he/her is registered in different courses
-                              if username in whitelist_users:
+                              if username in allowlist_users:
                                   if bl_course_id == course_id:
-                                      blacklist_users.add(username)
+                                      blocklist_users.add(username)
                                   else:
-                                      print ("\x1b[6;30;43m" + "[WARNING] {} not added to blacklist, the course id is different {} != {}".format(username, course_id, bl_course_id) + "\x1b[0m")
+                                      print ("\x1b[6;30;43m" + "[WARNING] {} not added to blocklist, the course id is different {} != {}".format(username, course_id, bl_course_id) + "\x1b[0m")
                                       
-                              #username is not in the whitelist
+                              #username is not in the allowlist
                               else:
-                                  blacklist_users.add(username)
+                                  blocklist_users.add(username)
 
-                  c.Authenticator.blacklist = blacklist_users
+                  c.Authenticator.blocklist = blocklist_users
               else:
                   print ("\x1b[6;30;43m" + "[WARNING] Exam only accepts exactly one course" + "\x1b[0m")
           #teaching mode
@@ -430,7 +430,7 @@ hub:
                       course_id_member_file = os.path.join(teaching_root, course_id+".csv")
                       if os.path.isfile(course_id_member_file):
                           db_file_pd = pd.read_csv(course_id_member_file)
-                          whitelist_users |= set(db_file_pd.Username)
+                          allowlist_users |= set(db_file_pd.Username)
                 
                       else:
                           print ("\x1b[6;30;43m" + "[WARNING] Course file not found: {}".format(course_id_member_file) + "; skipping....!" + "\x1b[0m")
@@ -440,20 +440,20 @@ hub:
           print ("\x1b[6;30;43m" + "[WARNING] Config file not found, add them manually in the admin panel" + "\x1b[0m")
      
 
-      #additional whitelist for hub admin
-      whitelist_dir = os.path.join(config_root, "whitelist")
-      if os.path.isdir(whitelist_dir):
-          whitelist_files = [csv_file for csv_file in os.listdir(whitelist_dir) if os.path.splitext(csv_file)[1] == ".csv"]
+      #additional allowlist for hub admin
+      allowlist_dir = os.path.join(config_root, "allowlist")
+      if os.path.isdir(allowlist_dir):
+          allowlist_files = [csv_file for csv_file in os.listdir(allowlist_dir) if os.path.splitext(csv_file)[1] == ".csv"]
 
-          print ("\x1b[6;30;42m"+ "[INFO] Found ",len(whitelist_files), " whitelist files" + "\x1b[0m")
-          print (whitelist_files)
+          print ("\x1b[6;30;42m"+ "[INFO] Found ",len(allowlist_files), " allowlist files" + "\x1b[0m")
+          print (allowlist_files)
 
-          for i,csv_file in enumerate(whitelist_files):
-              csv_path = os.path.join(whitelist_dir, csv_file)
+          for i,csv_file in enumerate(allowlist_files):
+              csv_path = os.path.join(allowlist_dir, csv_file)
               user_pd = pd.read_csv(csv_path)
-              whitelist_users |= set(user_pd.Username)
+              allowlist_users |= set(user_pd.Username)
 
-      c.Authenticator.whitelist = whitelist_users
+      c.Authenticator.allowlist = allowlist_users
 
 cull:
   enable: true
@@ -474,7 +474,7 @@ auth:
       user:
         searchBase: 'ou=students,dc=fb02,dc=fh-bonn-rhein-sied,dc=de'
         escape: False 
-  whitelist:
+  allowlist:
     users:
       - mwasil2m
       - tmetzl2m
