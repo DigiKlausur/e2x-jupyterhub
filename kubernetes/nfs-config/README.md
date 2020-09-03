@@ -1,6 +1,6 @@
 # Dynamic JupyterHub Configuration
 
-This directory is mounted to the JupyterHub container and the changes in the config file reflect the singleuser config such as its image and resources.
+the `jupyterhub` directory is mounted to the JupyterHub container and the changes in the config file reflect the singleuser config such as its image and resources.
 
 `nbgrader` directory contains lists of students registered in teaching and exam Hubs. The users in the lists have access the courses they are registered to.
 
